@@ -1,0 +1,19 @@
+# Hotspot-only build of maxus-edeliver3-passive.yaml for logging at chargers.
+# No home WiFi configured: the hotspot "maxus Fallback AP" starts right after boot
+# and stays up (no scanning for a home network, which could interrupt the log).
+# MQTT is configured but has no reachable broker, which is harmless (reboot_timeout: 0s).
+#
+# Later: flash maxus-edeliver3-passive.yaml with your real secrets instead, e.g. by
+# uploading its firmware.ota.bin in this build's web interface at http://192.168.4.1/.
+
+packages:
+  base: !include maxus-edeliver3-passive.yaml
+
+wifi:
+  ssid: !remove
+  password: !remove
+  power_save_mode: none   # max WiFi throughput for the CAN log
+
+# The captive portal would answer *every* GET request while the hotspot is the only
+# network (including the web UI and /events), so the CAN log would not work.
+captive_portal: !remove

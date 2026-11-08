@@ -1,0 +1,385 @@
+# Maxus eDeliver 3 -> MQTT, passive only: never sends a request or any data frame.
+# The CAN controller runs in NORMAL mode only so that it ACKs received frames:
+# the OBD port is a separate gateway bus with no other node, and without an ACK the
+# gateway resends the same frame forever (LISTENONLY -> endless 0x0C9 flood).
+# Hardware: MeatPi WiCAN OBD (ESP32-C3).
+#
+#   0x540  bytes 0-2  big endian            odometer in km     00 D5 D7 -> 54743 km
+#          (confirmed: 54743 km in Jan = UDS odometer, 80775 km in Nov)
+#          bytes 6-7  big endian            km to next service 0D 30    -> 3376 km
+#          (odometer + countdown = 60000 in Jan, 84151 in Nov, identical in 0x373)
+#
+# Only valid with IGNITION ON (detected by frame 0x510, which is only sent then).
+# With ignition off these frames carry small unrelated values (6F2 b1 = 9..11).
+#   0x6F2  byte 1                           SOC in % (integer)  41 -> 65 %  (display: 64 %)
+#          steps every ~40 s while DC charging at 41 kW (= 1 % of ~45-50 kWh)
+#   0x6F0  bits 15..4 (byte 0 + high nibble of byte 1)   range in km   09 D0 -> 157 km (display: 156)
+#   0x510  byte 3 - 40                      outdoor temp (?)    3A/3B -> 18/19 degC (display: 18)
+#
+# Vehicle status (experimental, derived from which frames are present):
+#   0x604 only seen while AC charging, 0x606 only while DC charging,
+#   0x510 only with ignition on. Not yet checked while driving or idle with ignition on.
+#
+# Less certain / informational:
+#   0x604  only sent while AC charging (absent during DC charging)
+#          bits 15..2 big endian * 0.1      voltage in V       36 1C    -> 346.2 V  (AC charger output?)
+#          byte 2 * 0.1                     current in A       63       -> 9.9 A    (AC charger output?)
+#   0x558  ?? ?? MM DD hh mm ss ??          vehicle clock UTC  .. 01 1E 0D 24 39 -> 01-30 13:36:57
+#   0x5B0  ASCII                            last 8 VIN chars   "NA068345"
+#
+# CAN logging without WiFi/MQTT (e.g. at a DC charger):
+#   1. Away from home the dongle opens the hotspot "${name} Fallback AP" after ~1 min.
+#   2. Connect a laptop to it, open http://192.168.4.1 and turn on the "CAN log" switch
+#      (or: curl -X POST 'http://192.168.4.1/switch/CAN%20log/turn_on').
+#   3. Record until Ctrl-C (candump -l format, readable by SavvyCAN / python-can / cantools):
+#        curl -sN http://192.168.4.1/events | grep --line-buffered -o '([0-9.]*) can0 [0-9A-F#]*' > charge.log
+#   Every frame becomes a log line streamed by the web server. If WiFi can't keep up,
+#   lines are dropped silently. Timestamps are seconds since the dongle booted.
+
+substitutions:
+  name: maxus
+  friendly_name: Maxus eDeliver 3
+  # sleep when no CAN traffic for this long and 12V is below sleep_below_v (DC/DC off)
+  sleep_idle_s: "300"
+  sleep_below_v: "13.2"
+  sleep_duration: 15min
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    - output.turn_on: led_power
+
+esp32:
+  board: esp32-c3-devkitm-1
+  variant: esp32c3
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "${name} Fallback AP"
+    password: !secret wifi_fallback_password
+
+captive_portal:
+
+logger:
+  level: INFO
+  baud_rate: 0          # no serial output, so logging isn't slowed down by the USB port
+
+ota:
+  - platform: esphome       # OTA from ESPHome / dashboard (password protected)
+    password: !secret ota_password
+  - platform: web_server    # OTA upload in the web interface at http://<dongle>/
+
+web_server:
+  port: 80
+  log: true             # streams the log (and so the CAN log) on /events
+  local: true           # embed the web UI's JS in the firmware (no internet in the hotspot)
+
+mqtt:
+  broker: !secret mqtt_broker
+  reboot_timeout: 0s    # default 15min would reboot the dongle at a charger without your broker
+  # publish a *retained* "ON" here to keep the dongle awake for OTA, "OFF" afterwards
+  on_message:
+    - topic: ${name}/ota_mode
+      payload: "ON"
+      then:
+        - deep_sleep.prevent: deep_sleep_1
+    - topic: ${name}/ota_mode
+      payload: "OFF"
+      then:
+        - deep_sleep.allow: deep_sleep_1
+
+deep_sleep:
+  id: deep_sleep_1
+  sleep_duration: ${sleep_duration}
+
+status_led:
+  pin:
+    number: GPIO8
+    inverted: true
+    ignore_strapping_warning: true
+
+output:
+  - platform: gpio
+    id: led_power
+    pin: GPIO7
+
+switch:
+  # off after every boot, so it can't flood the log by accident
+  - platform: template
+    id: can_log
+    name: "CAN log"
+    icon: mdi:record-rec
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    entity_category: config
+
+  # CAN transceiver standby pin: must be low for the transceiver to work
+  - platform: gpio
+    id: can_standby
+    pin: GPIO6
+    restore_mode: ALWAYS_OFF
+    internal: true
+
+globals:
+  - id: last_ac_ms           # last frame 0x604 (AC charging)
+    type: uint32_t
+    initial_value: "0"
+  - id: last_dc_ms           # last frame 0x606 (DC charging)
+    type: uint32_t
+    initial_value: "0"
+  - id: last_ignition_ms     # last frame 0x510 (only sent with ignition on)
+    type: uint32_t
+    initial_value: "0"
+  - id: last_frame_ms
+    type: uint32_t
+    initial_value: "0"
+
+canbus:
+  - platform: esp32_can
+    id: can0
+    tx_pin: GPIO0
+    rx_pin: GPIO3
+    can_id: 0         # required by ESPHome, never used (nothing is sent)
+    bit_rate: 500KBPS
+    mode: NORMAL      # needed to ACK frames, see top of file. No frames are sent.
+    rx_queue_len: 64  # default 5 overflows at full bus load
+    on_frame:
+      # any frame -> vehicle is awake (+ CAN log, if switched on)
+      - can_id: 0
+        can_id_mask: 0
+        then:
+          - lambda: |-
+              const uint32_t ms = millis();
+              id(last_frame_ms) = ms;
+              if (!id(can_log).state) return;
+              char data[17];
+              const size_t n = std::min<size_t>(x.size(), 8);
+              for (size_t i = 0; i < n; i++)
+                snprintf(data + 2 * i, 3, "%02X", x[i]);
+              data[2 * n] = 0;
+              ESP_LOGI("can", "(%u.%03u) can0 %03X#%s", (unsigned) (ms / 1000), (unsigned) (ms % 1000),
+                       (unsigned) can_id, data);
+
+      - can_id: 0x540
+        then:
+          - lambda: |-
+              if (x.size() < 3) return;
+              float km = (uint32_t(x[0]) << 16) | (uint32_t(x[1]) << 8) | x[2];
+              if (id(odometer).state != km)
+                id(odometer).publish_state(km);
+              if (x.size() < 8) return;
+              float svc = (uint16_t(x[6]) << 8) | x[7];
+              if (id(service_km).state != svc)
+                id(service_km).publish_state(svc);
+
+      # ignition on marker
+      - can_id: 0x510
+        then:
+          - lambda: |-
+              id(last_ignition_ms) = millis();
+              // byte 3 - 40: outdoor temperature (?), averaged by the sensor filter
+              if (x.size() >= 4)
+                id(outdoor_temp).publish_state(int(x[3]) - 40);
+
+      - can_id: 0x606
+        then:
+          - lambda: id(last_dc_ms) = millis();
+
+      # SOC in %, byte 1 (ignition on only)
+      - can_id: 0x6F2
+        then:
+          - lambda: |-
+              if (x.size() < 2) return;
+              if (id(last_ignition_ms) == 0 || millis() - id(last_ignition_ms) > 2000) return;
+              float pct = x[1];
+              if (pct > 100.0f) return;
+              if (id(soc).state != pct)
+                id(soc).publish_state(pct);
+
+      # range in km, 12 bit: byte 0 + high nibble of byte 1 (ignition on only)
+      - can_id: 0x6F0
+        then:
+          - lambda: |-
+              if (x.size() < 2) return;
+              if (id(last_ignition_ms) == 0 || millis() - id(last_ignition_ms) > 2000) return;
+              float km = (uint16_t(x[0]) << 4) | (x[1] >> 4);
+              if (id(range_km).state != km)
+                id(range_km).publish_state(km);
+
+      # EXPERIMENTAL: probably the on-board (AC) charger output. Only sent while AC
+      # charging: voltage 0.5 V above the BMS pack voltage, current 0.3 A above the
+      # pack current (= DC/DC consumption?). Not sent during DC charging.
+      - can_id: 0x604
+        then:
+          - lambda: |-
+              id(last_ac_ms) = millis();
+              if (x.size() < 3) return;
+              float v = (((uint16_t(x[0]) << 8) | x[1]) >> 2) * 0.1f;
+              float a = x[2] * 0.1f;
+              // the voltage LSB toggles constantly: only publish changes >= 0.2 V
+              if (std::isnan(id(chg_voltage).state) || fabsf(id(chg_voltage).state - v) >= 0.2f)
+                id(chg_voltage).publish_state(v);
+              if (id(chg_current).state != a)
+                id(chg_current).publish_state(a);
+
+      # vehicle clock (UTC), published with minute resolution
+      - can_id: 0x558
+        then:
+          - lambda: |-
+              if (x.size() < 7) return;
+              char buf[16];
+              snprintf(buf, sizeof(buf), "%02u-%02u %02u:%02u", x[2], x[3], x[4], x[5]);
+              if (id(vehicle_clock).state != buf)
+                id(vehicle_clock).publish_state(buf);
+
+      # last 8 characters of the VIN in ASCII
+      - can_id: 0x5B0
+        then:
+          - lambda: |-
+              if (x.size() < 8) return;
+              std::string vin(x.begin(), x.begin() + 8);
+              for (char c : vin)
+                if (c < 0x20 || c > 0x7E) return;
+              if (id(vin_tail).state != vin)
+                id(vin_tail).publish_state(vin);
+
+sensor:
+  - platform: template
+    id: outdoor_temp
+    name: "Outdoor temperature (experimental)"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - throttle_average: 60s   # frame comes ~45x per second
+
+  - platform: template
+    id: soc
+    name: "State of charge"
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 0
+    availability: null   # keep last value in HA while the dongle sleeps
+
+  - platform: template
+    id: range_km
+    name: "Range"
+    unit_of_measurement: km
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:map-marker-distance
+    availability: null
+
+  - platform: template
+    id: service_km
+    name: "Next service in"
+    unit_of_measurement: km
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:wrench-clock
+    availability: null
+
+  - platform: template
+    id: odometer
+    name: "Odometer"
+    unit_of_measurement: km
+    device_class: distance
+    state_class: total_increasing
+    accuracy_decimals: 0
+    icon: mdi:counter
+    availability: null   # keep last value in HA while the dongle sleeps
+
+  - platform: template
+    id: chg_voltage
+    name: "AC charger voltage (experimental)"
+    unit_of_measurement: V
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: template
+    id: chg_current
+    name: "AC charger current (experimental)"
+    unit_of_measurement: A
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: adc
+    id: vbat
+    name: "12V battery voltage"
+    pin: GPIO4
+    attenuation: 12db
+    update_interval: 1s
+    accuracy_decimals: 2
+    device_class: voltage
+    unit_of_measurement: V
+    filters:
+      - multiply: 7.25   # divider (100k + 16k) / 16k
+      - sliding_window_moving_average:
+          window_size: 10
+          send_every: 10
+
+text_sensor:
+  - platform: template
+    id: vehicle_status
+    name: "Vehicle status (experimental)"
+    icon: mdi:car-electric
+    availability: null
+    update_interval: 2s
+    lambda: |-
+      const uint32_t now = millis();
+      auto recent = [now](uint32_t t) { return t != 0 && now - t < 3000; };
+      std::string st;
+      if (recent(id(last_dc_ms))) st = "DC charging";
+      else if (recent(id(last_ac_ms))) st = "AC charging";
+      else if (recent(id(last_ignition_ms))) st = "Ignition on";
+      else if (recent(id(last_frame_ms))) st = "Awake";
+      else st = "Asleep";
+      if (st == id(vehicle_status).state) return {};
+      return st;
+
+  - platform: template
+    id: vehicle_clock
+    name: "Vehicle clock (UTC)"
+    icon: mdi:clock-outline
+    entity_category: diagnostic
+
+  - platform: template
+    id: vin_tail
+    name: "VIN (last 8)"
+    icon: mdi:car-info
+    entity_category: diagnostic
+
+binary_sensor:
+  - platform: template
+    id: vehicle_awake
+    name: "Vehicle awake"
+    device_class: running
+    lambda: return id(last_frame_ms) != 0 && millis() - id(last_frame_ms) < 10000;
+
+interval:
+  - interval: 30s
+    then:
+      - if:
+          condition:
+            lambda: |-
+              const uint32_t idle_ms = ${sleep_idle_s} * 1000UL;
+              if (millis() < idle_ms) return false;                     // stay up a while after boot
+              if (millis() - id(last_frame_ms) < idle_ms) return false; // car still active
+              float v = id(vbat).state;
+              return std::isnan(v) || v < ${sleep_below_v};             // DC/DC off
+          then:
+            - switch.turn_on: can_standby
+            - deep_sleep.enter: deep_sleep_1
