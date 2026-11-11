@@ -1,0 +1,287 @@
+# maxus-edeliver3-passive.yaml + UDS polling of the BMS.
+#
+# Adds values that are not broadcast on the OBD port: HV voltage/current/power, SOC with
+# 0.1 % resolution, pack temperatures, capacity and 104 cell voltages.
+#
+# UDS = the dongle *sends* ReadDataByIdentifier (0x22) requests. Read-only, but no longer
+# passive. To never wake up or keep awake the van, requests are only sent while the
+# ignition is on or the van is charging (frames 0x510 / 0x604 / 0x606 present).
+#
+# The BMS CAN IDs are a guess (0x748/0x7C8, used by OVMS for the eDeliver 3).
+# If "UDS timeouts" rises and "UDS responses" stays 0, change uds_tx_id / uds_rx_id.
+#
+# DIDs (decoding checked against logs read during AC charging):
+#   B105  HV current     (raw - 0x8000) * 0.1 A, negative = charging   7FA0 -> -9.6 A
+#   B143  pack voltage   0.1 V                                          0D81 -> 345.7 V
+#   D117  SOC            0.1 %                                          0177 -> 37.5 %
+#   E101  odometer       UINT24, 0.1 km                                 085A69 -> 54743.3 km
+#   B110  temperatures   3x UINT16 max/min/avg, 0.1 degC (unverified)  0096 0089 0090
+#   B136  capacity       0.1 Ah (?)                                     05AF -> 145.5 Ah
+#   B142  cell voltages  110x UINT16 mV, 104 used
+#   B132/B134            unknown UINT16, published raw (both 0x08BD)
+
+packages:
+  base: !include maxus-edeliver3-passive.yaml
+
+substitutions:
+  uds_tx_id: "0x748"
+  uds_rx_id: "0x7C8"
+
+esphome:
+  includes:
+    - maxus_uds.h
+
+switch:
+  - platform: template
+    id: uds_polling
+    name: "UDS polling"
+    icon: mdi:car-connected
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+interval:
+  - interval: 20ms
+    then:
+      - lambda: |-
+          if (!maxus::uds.is_setup()) {
+            maxus::uds.setup(id(can0), ${uds_tx_id});
+            // responses from the BMS (a callback instead of on_frame, which can't be
+            // added to the base config's canbus through packages)
+            id(can0)->add_callback([](uint32_t can_id, bool ext, bool rtr, const std::vector<uint8_t> &data) {
+              if (!ext && !rtr && can_id == ${uds_rx_id})
+                maxus::uds.handle_frame(data);
+            });
+            maxus::uds.add(0xB105,   5000);  // HV current
+            maxus::uds.add(0xB143,   5000);  // HV pack voltage
+            maxus::uds.add(0xD117,  30000);  // SOC
+            maxus::uds.add(0xB110,  60000);  // pack temperatures max/min/avg
+            maxus::uds.add(0xB142,  60000);  // cell voltages
+            maxus::uds.add(0xB132, 120000);  // unknown
+            maxus::uds.add(0xB134, 120000);  // unknown
+            maxus::uds.add(0xB136, 600000);  // capacity
+            maxus::uds.add(0xE101, 300000);  // odometer 0.1 km
+
+            maxus::uds.on_response([](uint16_t did, const std::vector<uint8_t> &d) {
+              switch (did) {
+                case 0xB105: {
+                  if (d.size() < 2) break;
+                  float amps = (int32_t(maxus::be16(d, 0)) - 0x8000) * 0.1f;
+                  id(hv_current).publish_state(amps);
+                  if (!std::isnan(id(hv_voltage).state))
+                    id(hv_power).publish_state(amps * id(hv_voltage).state / 1000.0f);
+                  break;
+                }
+                case 0xB143:
+                  if (d.size() < 2) break;
+                  id(hv_voltage).publish_state(maxus::be16(d, 0) * 0.1f);
+                  break;
+                case 0xD117:
+                  if (d.size() < 2) break;
+                  id(bms_soc).publish_state(maxus::be16(d, 0) * 0.1f);
+                  break;
+                case 0xB110:
+                  if (d.size() < 6) break;
+                  id(bat_temp_max).publish_state(maxus::be16(d, 0) * 0.1f);
+                  id(bat_temp_min).publish_state(maxus::be16(d, 2) * 0.1f);
+                  id(bat_temp_avg).publish_state(maxus::be16(d, 4) * 0.1f);
+                  break;
+                case 0xB132:
+                  if (d.size() < 2) break;
+                  id(bms_b132).publish_state(maxus::be16(d, 0));
+                  break;
+                case 0xB134:
+                  if (d.size() < 2) break;
+                  id(bms_b134).publish_state(maxus::be16(d, 0));
+                  break;
+                case 0xB136:
+                  if (d.size() < 2) break;
+                  id(bat_capacity).publish_state(maxus::be16(d, 0) * 0.1f);
+                  break;
+                case 0xE101:
+                  if (d.size() < 3) break;
+                  id(odometer_precise).publish_state(maxus::be24(d, 0) * 0.1f);
+                  break;
+                case 0xB142: {
+                  std::string json = "[";
+                  uint16_t vmin = 0xFFFF, vmax = 0, n = 0;
+                  uint32_t sum = 0;
+                  for (size_t i = 0; i + 1 < d.size(); i += 2) {
+                    uint16_t mv = maxus::be16(d, i);
+                    if (mv == 0 || mv == 0xFFFF) continue;  // unused slot
+                    if (n) json += ",";
+                    json += std::to_string(mv);
+                    vmin = std::min(vmin, mv);
+                    vmax = std::max(vmax, mv);
+                    sum += mv;
+                    n++;
+                  }
+                  json += "]";
+                  if (n == 0) break;
+                  id(cell_v_min).publish_state(vmin / 1000.0f);
+                  id(cell_v_max).publish_state(vmax / 1000.0f);
+                  id(cell_v_avg).publish_state(sum / (n * 1000.0f));
+                  id(cell_v_delta).publish_state(vmax - vmin);
+                  id(cell_count).publish_state(n);
+                  if (mqtt::global_mqtt_client != nullptr && mqtt::global_mqtt_client->is_connected())
+                    mqtt::global_mqtt_client->publish("${name}/bms/cell_voltages", json, 0, true);
+                  break;
+                }
+                default:
+                  break;
+              }
+            });
+          }
+
+          // only poll while the van is active on its own (ignition on or charging)
+          const uint32_t now = millis();
+          auto recent = [now](uint32_t t) { return t != 0 && now - t < 3000; };
+          const bool active = recent(id(last_ignition_ms)) || recent(id(last_ac_ms)) || recent(id(last_dc_ms));
+          static bool was_active = false;
+          if (active && !was_active)
+            maxus::uds.reset_schedule();
+          was_active = active;
+          maxus::uds.loop(active && id(uds_polling).state);
+
+sensor:
+  - platform: template
+    id: bms_soc
+    name: "State of charge (BMS)"
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    accuracy_decimals: 1
+    availability: null
+
+  - platform: template
+    id: hv_voltage
+    name: "HV battery voltage"
+    unit_of_measurement: V
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: template
+    id: hv_current
+    name: "HV battery current"
+    unit_of_measurement: A
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: template
+    id: hv_power
+    name: "HV battery power"
+    unit_of_measurement: kW
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 2
+
+  - platform: template
+    id: bat_temp_max
+    name: "HV battery temperature max"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: template
+    id: bat_temp_min
+    name: "HV battery temperature min"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: template
+    id: bat_temp_avg
+    name: "HV battery temperature avg"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+
+  - platform: template
+    id: bms_b132
+    name: "BMS DID B132 (raw)"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: template
+    id: bms_b134
+    name: "BMS DID B134 (raw)"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: template
+    id: bat_capacity
+    name: "HV battery capacity"
+    unit_of_measurement: Ah
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:battery-heart-variant
+    availability: null
+
+  - platform: template
+    id: odometer_precise
+    name: "Odometer (BMS)"
+    unit_of_measurement: km
+    device_class: distance
+    state_class: total_increasing
+    accuracy_decimals: 1
+    entity_category: diagnostic
+    availability: null
+
+  - platform: template
+    id: cell_v_min
+    name: "Cell voltage min"
+    unit_of_measurement: V
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+
+  - platform: template
+    id: cell_v_max
+    name: "Cell voltage max"
+    unit_of_measurement: V
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+
+  - platform: template
+    id: cell_v_avg
+    name: "Cell voltage avg"
+    unit_of_measurement: V
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 3
+
+  - platform: template
+    id: cell_v_delta
+    name: "Cell voltage delta"
+    unit_of_measurement: mV
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 0
+
+  - platform: template
+    id: cell_count
+    name: "Cell count"
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  - platform: template
+    name: "UDS timeouts"
+    state_class: total_increasing
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: return maxus::uds.timeouts();
+
+  - platform: template
+    name: "UDS responses"
+    state_class: total_increasing
+    accuracy_decimals: 0
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: return maxus::uds.responses();
