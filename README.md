@@ -13,6 +13,7 @@ reads a Maxus eDeliver 3 and publishes the values via MQTT (Home Assistant auto-
 | `maxus-edeliver3-passive.yaml` | main config: home WiFi + MQTT, fallback hotspot, CAN log |
 | `maxus-edeliver3-charger.yaml` | hotspot-only variant (no home WiFi), e.g. for logging at a charger |
 | `maxus-edeliver3-uds.yaml` + `maxus_uds.h` | passive config + UDS polling of the BMS (not passive) |
+| `maxus-edeliver3-charger-uds.yaml` | hotspot-only variant of the UDS config, e.g. for logging while driving |
 | `secrets.yaml` | dummy values, replace with your own |
 
 ## Sensors
