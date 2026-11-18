@@ -67,14 +67,14 @@ interval:
                 case 0xB105: {
                   if (d.size() < 2) break;
                   float amps = (int32_t(maxus::be16(d, 0)) - 0x8000) * 0.1f;
-                  id(hv_current).publish_state(amps);
-                  if (!std::isnan(id(hv_voltage).state))
-                    id(hv_power).publish_state(amps * id(hv_voltage).state / 1000.0f);
+                  id(bms_current).publish_state(amps);
+                  if (!std::isnan(id(bms_voltage).state))
+                    id(bms_power).publish_state(amps * id(bms_voltage).state / 1000.0f);
                   break;
                 }
                 case 0xB143:
                   if (d.size() < 2) break;
-                  id(hv_voltage).publish_state(maxus::be16(d, 0) * 0.1f);
+                  id(bms_voltage).publish_state(maxus::be16(d, 0) * 0.1f);
                   break;
                 case 0xD117:
                   if (d.size() < 2) break;
@@ -154,24 +154,24 @@ sensor:
     availability: null
 
   - platform: template
-    id: hv_voltage
-    name: "HV battery voltage"
+    id: bms_voltage
+    name: "HV battery voltage (BMS)"
     unit_of_measurement: V
     device_class: voltage
     state_class: measurement
     accuracy_decimals: 1
 
   - platform: template
-    id: hv_current
-    name: "HV battery current"
+    id: bms_current
+    name: "HV battery current (BMS)"
     unit_of_measurement: A
     device_class: current
     state_class: measurement
     accuracy_decimals: 1
 
   - platform: template
-    id: hv_power
-    name: "HV battery power"
+    id: bms_power
+    name: "HV battery power (BMS)"
     unit_of_measurement: kW
     device_class: power
     state_class: measurement

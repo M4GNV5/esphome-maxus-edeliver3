@@ -14,11 +14,18 @@
 #   0x6F2  byte 1                           SOC in % (integer)  41 -> 65 %  (display: 64 %)
 #          steps every ~40 s while DC charging at 41 kW (= 1 % of ~45-50 kWh)
 #   0x6F0  bits 15..4 (byte 0 + high nibble of byte 1)   range in km   09 D0 -> 157 km (display: 156)
+#          bytes 4-5 big endian - 400       HV current in A     01 1C -> -116 A (display: -116 A)
+#          (positive = discharging; checked at 116/114 A DC charging, regen and driving)
+#          byte 6 * 2                       HV voltage in V     B2    -> 356 V  (display: 356 V)
+#   0x6F0  byte 4                           speed in km/h       4F    -> 79 km/h
 #   0x510  byte 3 - 40                      outdoor temp (?)    3A/3B -> 18/19 degC (display: 18)
+#   0x5E0  bytes 0-3 * 2.75 kPa             tire pressures FL, FR, RR, RL (FF = no data)
+#          83 84 81 84 -> 3.60 3.63 3.55 3.63 bar (display: FL 3.60 FR 3.63 RL 3.63 RR 3.54)
+#   0x23C  bytes 0-1 big endian             motor speed in rpm (?)  ~62 x km/h
 #
 # Vehicle status (experimental, derived from which frames are present):
 #   0x604 only seen while AC charging, 0x606 only while DC charging,
-#   0x510 only with ignition on. Not yet checked while driving or idle with ignition on.
+#   0x510 only with ignition on, speed > 0 -> Driving. Not yet checked idle with ignition on.
 #
 # Less certain / informational:
 #   0x604  only sent while AC charging (absent during DC charging)
@@ -199,9 +206,15 @@ canbus:
               if (x.size() < 2) return;
               if (id(last_ignition_ms) == 0 || millis() - id(last_ignition_ms) > 2000) return;
               float pct = x[1];
-              if (pct > 100.0f) return;
-              if (id(soc).state != pct)
+              if (pct <= 100.0f && id(soc).state != pct)
                 id(soc).publish_state(pct);
+              if (x.size() < 7) return;
+              // HV current (positive = discharging) and voltage, averaged by the sensor filters
+              float amps = int(((uint16_t(x[4]) << 8) | x[5])) - 400;
+              float volts = x[6] * 2.0f;
+              id(hv_current).publish_state(amps);
+              id(hv_voltage).publish_state(volts);
+              id(hv_power).publish_state(amps * volts / 1000.0f);
 
       # range in km, 12 bit: byte 0 + high nibble of byte 1 (ignition on only)
       - can_id: 0x6F0
@@ -212,6 +225,31 @@ canbus:
               float km = (uint16_t(x[0]) << 4) | (x[1] >> 4);
               if (id(range_km).state != km)
                 id(range_km).publish_state(km);
+              if (x.size() < 5) return;
+              float kmh = x[4];
+              if (id(speed).state != kmh)
+                id(speed).publish_state(kmh);
+
+      # tire pressures, 2.75 kPa per bit, order FL, FR, RR, RL. FF = no data (ignition off)
+      - can_id: 0x5E0
+        then:
+          - lambda: |-
+              if (x.size() < 4) return;
+              sensor::Sensor *tires[4] = {id(tire_fl), id(tire_fr), id(tire_rr), id(tire_rl)};
+              for (int i = 0; i < 4; i++) {
+                if (x[i] == 0xFF) continue;
+                float bar = x[i] * 0.0275f;
+                if (std::isnan(tires[i]->state) || fabsf(tires[i]->state - bar) > 0.001f)
+                  tires[i]->publish_state(bar);
+              }
+
+      # motor speed (?), ~62 rpm per km/h (ignition on only)
+      - can_id: 0x23C
+        then:
+          - lambda: |-
+              if (x.size() < 2) return;
+              if (id(last_ignition_ms) == 0 || millis() - id(last_ignition_ms) > 2000) return;
+              id(motor_rpm).publish_state((uint16_t(x[0]) << 8) | x[1]);
 
       # EXPERIMENTAL: probably the on-board (AC) charger output. Only sent while AC
       # charging: voltage 0.5 V above the BMS pack voltage, current 0.3 A above the
@@ -251,6 +289,94 @@ canbus:
                 id(vin_tail).publish_state(vin);
 
 sensor:
+  - platform: template
+    id: hv_current
+    name: "HV battery current"
+    unit_of_measurement: A
+    device_class: current
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - throttle_average: 5s   # frame comes ~2x per second
+
+  - platform: template
+    id: hv_voltage
+    name: "HV battery voltage"
+    unit_of_measurement: V
+    device_class: voltage
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - throttle_average: 5s
+
+  - platform: template
+    id: hv_power
+    name: "HV battery power"
+    unit_of_measurement: kW
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 1
+    filters:
+      - throttle_average: 5s
+
+  - platform: template
+    id: speed
+    name: "Speed"
+    unit_of_measurement: km/h
+    device_class: speed
+    state_class: measurement
+    accuracy_decimals: 0
+
+  - platform: template
+    id: motor_rpm
+    name: "Motor speed (experimental)"
+    unit_of_measurement: rpm
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:engine
+    filters:
+      - throttle_average: 5s   # frame comes ~40x per second
+
+  - platform: template
+    id: tire_fl
+    name: "Tire pressure FL"
+    unit_of_measurement: bar
+    device_class: pressure
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:car-tire-alert
+    availability: null
+
+  - platform: template
+    id: tire_fr
+    name: "Tire pressure FR"
+    unit_of_measurement: bar
+    device_class: pressure
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:car-tire-alert
+    availability: null
+
+  - platform: template
+    id: tire_rl
+    name: "Tire pressure RL"
+    unit_of_measurement: bar
+    device_class: pressure
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:car-tire-alert
+    availability: null
+
+  - platform: template
+    id: tire_rr
+    name: "Tire pressure RR"
+    unit_of_measurement: bar
+    device_class: pressure
+    state_class: measurement
+    accuracy_decimals: 2
+    icon: mdi:car-tire-alert
+    availability: null
+
   - platform: template
     id: outdoor_temp
     name: "Outdoor temperature (experimental)"
@@ -344,7 +470,8 @@ text_sensor:
       std::string st;
       if (recent(id(last_dc_ms))) st = "DC charging";
       else if (recent(id(last_ac_ms))) st = "AC charging";
-      else if (recent(id(last_ignition_ms))) st = "Ignition on";
+      else if (recent(id(last_ignition_ms)))
+        st = (!std::isnan(id(speed).state) && id(speed).state > 0) ? "Driving" : "Ignition on";
       else if (recent(id(last_frame_ms))) st = "Awake";
       else st = "Asleep";
       if (st == id(vehicle_status).state) return {};

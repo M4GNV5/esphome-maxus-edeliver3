@@ -24,16 +24,21 @@ reads a Maxus eDeliver 3 and publishes the values via MQTT (Home Assistant auto-
 | Next service in | `0x540` | bytes 6-7, big endian, km | odometer + countdown = service due km |
 | State of charge | `0x6F2` | byte 1, % | **ignition on only** |
 | Range | `0x6F0` | byte 0 + upper nibble of byte 1 (12 bit), km | **ignition on only** |
+| HV battery current | `0x6F2` | bytes 4-5 big endian − 400, A, positive = discharging | **ignition on only**; matches display while DC charging |
+| HV battery voltage | `0x6F2` | byte 6 × 2, V | **ignition on only**; matches display while DC charging |
+| HV battery power | | voltage × current | |
+| Speed | `0x6F0` | byte 4, km/h | |
+| Tire pressures FL / FR / RR / RL | `0x5E0` | bytes 0-3 × 2.75 kPa | `FF` = no data; matches display within 0.01 bar |
+| Motor speed (experimental) | `0x23C` | bytes 0-1 big endian, rpm (?) | ≈ 62 × km/h |
 | Outdoor temperature (experimental) | `0x510` | byte 3 − 40, °C | |
 | AC charger voltage / current (experimental) | `0x604` | bits 15..2 × 0.1 V / byte 2 × 0.1 A | frame only sent while AC charging |
-| Vehicle status (experimental) | | which frames are present | `0x604` = AC charging, `0x606` = DC charging, `0x510` = ignition on |
+| Vehicle status (experimental) | | which frames are present | `0x604` = AC charging, `0x606` = DC charging, `0x510` = ignition on, speed > 0 = driving |
 | Vehicle clock (UTC) | `0x558` | `?? ?? MM DD hh mm ss ??` | |
 | VIN (last 8) | `0x5B0` | ASCII | |
 | 12V battery voltage | ADC | GPIO4 × 116/16 | measured by the dongle |
 
 SOC and range frames carry unrelated values with the ignition off. Ignition is detected by the presence
-of frame `0x510`. Pack voltage/current, tire pressures and the trip odometer were not found on the
-OBD port.
+of frame `0x510`. The trip odometer was not found on the OBD port.
 
 ## UDS variant
 
@@ -43,9 +48,9 @@ charging, so the dongle never wakes the van or keeps it awake.
 
 | Sensor | DID | Decoding |
 |---|---|---|
-| HV battery current | `B105` | (raw − 0x8000) × 0.1 A, negative = charging |
-| HV battery voltage | `B143` | 0.1 V |
-| HV battery power | | voltage × current |
+| HV battery current (BMS) | `B105` | (raw − 0x8000) × 0.1 A, negative = charging |
+| HV battery voltage (BMS) | `B143` | 0.1 V |
+| HV battery power (BMS) | | voltage × current |
 | State of charge (BMS) | `D117` | 0.1 % |
 | Odometer (BMS) | `E101` | UINT24, 0.1 km |
 | HV battery temperature max/min/avg | `B110` | 3 × UINT16, 0.1 °C (unverified) |
