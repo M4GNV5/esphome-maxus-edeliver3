@@ -7,8 +7,8 @@
 # passive. To never wake up or keep awake the van, requests are only sent while the
 # ignition is on or the van is charging (frames 0x510 / 0x604 / 0x606 present).
 #
-# The BMS CAN IDs are a guess (0x748/0x7C8, used by OVMS for the eDeliver 3).
-# If "UDS timeouts" rises and "UDS responses" stays 0, change uds_tx_id / uds_rx_id.
+# BMS CAN IDs 0x748 (request) / 0x7C8 (response) confirmed while driving: B105 and B143
+# match the passive values from 0x6F2 (e.g. +147.1 A vs +146 A, 329.9 V vs 328 V).
 #
 # DIDs (decoding checked against logs read during AC charging):
 #   B105  HV current     (raw - 0x8000) * 0.1 A, negative = charging   7FA0 -> -9.6 A

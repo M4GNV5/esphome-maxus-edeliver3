@@ -58,9 +58,10 @@ charging, so the dongle never wakes the van or keeps it awake.
 | Cell voltage min/max/avg/delta | `B142` | 110 × UINT16 mV, 104 used; full list as JSON on `<name>/bms/cell_voltages` |
 | BMS DID B132/B134 (raw) | `B132`, `B134` | unknown |
 
-The decoding was checked against values read while AC charging. **The BMS CAN IDs are not
-confirmed**: the default `0x748`/`0x7C8` is what OVMS uses for the eDeliver 3. If the "UDS timeouts"
-counter rises and "UDS responses" stays 0, set `uds_tx_id` / `uds_rx_id` to the right IDs.
+The decoding was checked against values read while AC charging, and the BMS CAN IDs
+`0x748` (request) / `0x7C8` (response) were confirmed while driving: current and voltage from UDS
+match the passive values from `0x6F2` (e.g. +147.1 A vs +146 A, 329.9 V vs 328 V). Multi-frame
+responses (cell voltages, temperatures) haven't been seen in a log yet.
 
 ## Hardware notes (WiCAN OBD, ESP32-C3)
 
