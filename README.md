@@ -40,6 +40,13 @@ reads a Maxus eDeliver 3 and publishes the values via MQTT (Home Assistant auto-
 SOC and range frames carry unrelated values with the ignition off. Ignition is detected by the presence
 of frame `0x510`. The trip odometer was not found on the OBD port.
 
+## Stale values
+
+Live values (current, voltage, power, speed, tire pressures, temperatures, motor speed, cell
+voltages) become **NA** when no new value arrived for 15 min, and are unavailable while the dongle
+sleeps. They are re-sent at least every 60 s while data comes in. SOC, range, odometer, next service
+and capacity keep their last value, since they don't change while the van is off.
+
 ## UDS variant
 
 `maxus-edeliver3-uds.yaml` includes the passive config and additionally reads the BMS via UDS

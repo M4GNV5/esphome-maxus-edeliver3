@@ -160,6 +160,8 @@ sensor:
     device_class: voltage
     state_class: measurement
     accuracy_decimals: 1
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: bms_current
@@ -168,6 +170,8 @@ sensor:
     device_class: current
     state_class: measurement
     accuracy_decimals: 1
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: bms_power
@@ -176,6 +180,8 @@ sensor:
     device_class: power
     state_class: measurement
     accuracy_decimals: 2
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: bat_temp_max
@@ -184,6 +190,8 @@ sensor:
     device_class: temperature
     state_class: measurement
     accuracy_decimals: 1
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: bat_temp_min
@@ -192,6 +200,8 @@ sensor:
     device_class: temperature
     state_class: measurement
     accuracy_decimals: 1
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: bat_temp_avg
@@ -200,18 +210,24 @@ sensor:
     device_class: temperature
     state_class: measurement
     accuracy_decimals: 1
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: bms_b132
     name: "BMS DID B132 (raw)"
     accuracy_decimals: 0
     entity_category: diagnostic
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: bms_b134
     name: "BMS DID B134 (raw)"
     accuracy_decimals: 0
     entity_category: diagnostic
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: bat_capacity
@@ -239,6 +255,8 @@ sensor:
     device_class: voltage
     state_class: measurement
     accuracy_decimals: 3
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: cell_v_max
@@ -247,6 +265,8 @@ sensor:
     device_class: voltage
     state_class: measurement
     accuracy_decimals: 3
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: cell_v_avg
@@ -255,6 +275,8 @@ sensor:
     device_class: voltage
     state_class: measurement
     accuracy_decimals: 3
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: cell_v_delta
@@ -263,6 +285,8 @@ sensor:
     device_class: voltage
     state_class: measurement
     accuracy_decimals: 0
+    filters:
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: cell_count

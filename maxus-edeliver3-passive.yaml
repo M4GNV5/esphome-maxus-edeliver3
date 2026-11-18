@@ -34,6 +34,10 @@
 #   0x558  ?? ?? MM DD hh mm ss ??          vehicle clock UTC  .. 01 1E 0D 24 39 -> 01-30 13:36:57
 #   0x5B0  ASCII                            last 8 VIN chars   "NA068345"
 #
+# Live values (current, voltage, speed, tire pressures, temperatures, ...) become NA when no
+# new value arrived for 15 min, and are unavailable while the dongle sleeps. SOC, range,
+# odometer and service keep their last value (they don't change while the van is off).
+#
 # CAN logging without WiFi/MQTT (e.g. at a DC charger):
 #   1. Away from home the dongle opens the hotspot "${name} Fallback AP" after ~1 min.
 #   2. Connect a laptop to it, open http://192.168.4.1 and turn on the "CAN log" switch
@@ -226,9 +230,7 @@ canbus:
               if (id(range_km).state != km)
                 id(range_km).publish_state(km);
               if (x.size() < 5) return;
-              float kmh = x[4];
-              if (id(speed).state != kmh)
-                id(speed).publish_state(kmh);
+              id(speed).publish_state(x[4]);
 
       # tire pressures, 2.75 kPa per bit, order FL, FR, RR, RL. FF = no data (ignition off)
       - can_id: 0x5E0
@@ -238,9 +240,7 @@ canbus:
               sensor::Sensor *tires[4] = {id(tire_fl), id(tire_fr), id(tire_rr), id(tire_rl)};
               for (int i = 0; i < 4; i++) {
                 if (x[i] == 0xFF) continue;
-                float bar = x[i] * 0.0275f;
-                if (std::isnan(tires[i]->state) || fabsf(tires[i]->state - bar) > 0.001f)
-                  tires[i]->publish_state(bar);
+                tires[i]->publish_state(x[i] * 0.0275f);
               }
 
       # motor speed (?), ~62 rpm per km/h (ignition on only)
@@ -261,11 +261,8 @@ canbus:
               if (x.size() < 3) return;
               float v = (((uint16_t(x[0]) << 8) | x[1]) >> 2) * 0.1f;
               float a = x[2] * 0.1f;
-              // the voltage LSB toggles constantly: only publish changes >= 0.2 V
-              if (std::isnan(id(chg_voltage).state) || fabsf(id(chg_voltage).state - v) >= 0.2f)
-                id(chg_voltage).publish_state(v);
-              if (id(chg_current).state != a)
-                id(chg_current).publish_state(a);
+              id(chg_voltage).publish_state(v);
+              id(chg_current).publish_state(a);
 
       # vehicle clock (UTC), published with minute resolution
       - can_id: 0x558
@@ -298,6 +295,7 @@ sensor:
     accuracy_decimals: 1
     filters:
       - throttle_average: 5s   # frame comes ~2x per second
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: hv_voltage
@@ -308,6 +306,7 @@ sensor:
     accuracy_decimals: 0
     filters:
       - throttle_average: 5s
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: hv_power
@@ -318,6 +317,7 @@ sensor:
     accuracy_decimals: 1
     filters:
       - throttle_average: 5s
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: speed
@@ -326,6 +326,11 @@ sensor:
     device_class: speed
     state_class: measurement
     accuracy_decimals: 0
+    filters:
+      - or:                   # publish on change, at least every 60 s
+          - throttle: 60s
+          - delta: 1
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: motor_rpm
@@ -336,6 +341,7 @@ sensor:
     icon: mdi:engine
     filters:
       - throttle_average: 5s   # frame comes ~40x per second
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: tire_fl
@@ -345,7 +351,11 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     icon: mdi:car-tire-alert
-    availability: null
+    filters:
+      - or:                   # publish on change, at least every 60 s
+          - throttle: 60s
+          - delta: 0.01
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: tire_fr
@@ -355,7 +365,11 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     icon: mdi:car-tire-alert
-    availability: null
+    filters:
+      - or:                   # publish on change, at least every 60 s
+          - throttle: 60s
+          - delta: 0.01
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: tire_rl
@@ -365,7 +379,11 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     icon: mdi:car-tire-alert
-    availability: null
+    filters:
+      - or:                   # publish on change, at least every 60 s
+          - throttle: 60s
+          - delta: 0.01
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: tire_rr
@@ -375,7 +393,11 @@ sensor:
     state_class: measurement
     accuracy_decimals: 2
     icon: mdi:car-tire-alert
-    availability: null
+    filters:
+      - or:                   # publish on change, at least every 60 s
+          - throttle: 60s
+          - delta: 0.01
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: outdoor_temp
@@ -386,6 +408,7 @@ sensor:
     accuracy_decimals: 1
     filters:
       - throttle_average: 60s   # frame comes ~45x per second
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: soc
@@ -433,6 +456,11 @@ sensor:
     device_class: voltage
     state_class: measurement
     accuracy_decimals: 1
+    filters:
+      - or:                   # publish on change, at least every 60 s
+          - throttle: 60s
+          - delta: 0.2
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: template
     id: chg_current
@@ -441,6 +469,11 @@ sensor:
     device_class: current
     state_class: measurement
     accuracy_decimals: 1
+    filters:
+      - or:                   # publish on change, at least every 60 s
+          - throttle: 60s
+          - delta: 0.1
+      - timeout: 15min        # NA if no new value for 15 min
 
   - platform: adc
     id: vbat
